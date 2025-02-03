@@ -1037,6 +1037,7 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
 
   //static int calculate_index(size_t size);
   static int get_from_domain_table(Address address);
+  static int domain_bits_get(Address address);
 
 /*
   struct wasdom_user_input_table {
@@ -1069,7 +1070,7 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   void Commit(base::AddressRegion);
   static bool ARM_SetDomainAndDACR(Address address, size_t size, int domain_val);
   //int calculate_index(size_t size);
-  static int domain_bits_get(Address address);
+  
   static void Record_Table(Address address, size_t size, size_t hint, int domain_bits);
   void Decommit(base::AddressRegion);
 
@@ -1199,7 +1200,7 @@ struct wasdom_user_input {
 class JIT_Writable {
 public:
     explicit JIT_Writable(const char* comment, int domainValue) : domain_val(domainValue) {
-        printf("%s - Setting DACR writable for domain %d\n", comment, domain_val);
+        //printf("%s - Setting DACR writable for domain %d\n", comment, domain_val);
         if (!v8::internal::v8_flags.jitless) {
             Set_DACR_Writable(domain_val);
         }
@@ -1248,7 +1249,7 @@ private:
                 close(fd);
                 return;
             }
-            printf("Set_DACR_Writable ----- (manager applied)\n");
+            //printf("Set_DACR_Writable ----- (manager applied)\n");
         }
         code_space_write_nesting_level_++;
         close(fd);
@@ -1288,10 +1289,10 @@ private:
                 return;
             }
 
-            printf("Set_DACR_Executable ----- (client applied)\n");
+            //printf("Set_DACR_Executable ----- (client applied)\n");
         }
         close(fd);
-    
+    }
 };
 
 

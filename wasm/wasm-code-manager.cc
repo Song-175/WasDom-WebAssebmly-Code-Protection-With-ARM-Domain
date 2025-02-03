@@ -68,10 +68,11 @@
 #define WASDOM_DACR_MANAGER   3       // during jit compile
 
   struct wasdom_user_input_table {
-    int domain_val;      // 도메인 번호
-    uintptr_t start;     // 시작 주소
-    uintptr_t size;      // 크기
-    void* hint;          // 추가적인 힌트 또는 정보
+    
+    unsigned long start_addr;
+    unsigned long size;
+    unsigned long hint;
+    int domain_val;
   };
 
     struct wasdom_user_input_domain {
@@ -768,11 +769,9 @@ base::Vector<uint8_t> WasmCodeAllocator::AllocateForCodeInRegion(
       V8::FatalProcessOutOfMemory(nullptr, "Grow wasm code space",
                                   oom_detail.PrintToArray().data());
     }
-        //랜덤한 vault index를 생성 (domain bit 설정을 위해)
-    srand(time(NULL)); // 랜덤 시드 설정
-    int code_vault_index = (rand() % (15 - 4 + 1)) + 4; // 4부터 15 사이의 랜덤 숫자
+
     VirtualMemory new_mem =
-        code_manager->TryAllocate(reserve_size, code_vault_index, reinterpret_cast<void*>(hint));
+        code_manager->TryAllocate(reserve_size, 0, reinterpret_cast<void*>(hint));
     if (!new_mem.IsReserved()) {
       auto oom_detail = base::FormattedString{}
                         << "cannot allocate more code space (" << reserve_size
@@ -1973,9 +1972,10 @@ void WasmCodeManager::Commit(base::AddressRegion region) {
 #endif // V8_HAS_PKU_JIT_WRITE_PROTECT
 } else {
 
-int domain_number = WasmCodeManager::get_from_domain_table(reinterpret_cast<Address>(region.begin()));
+//int domain_number = WasmCodeManager::get_from_domain_table(reinterpret_cast<Address>(region.begin()));
 
-success = ARM_SetDomainAndDACR(region.begin(), region.size(), domain_number);
+//success = ARM_SetDomainAndDACR(region.begin(), region.size(), domain_number);
+success = SetPermissions(GetPlatformPageAllocator(), region.begin(), region.size(), PageAllocator::kReadWriteExecute);
 }
 if (V8_UNLIKELY(!success)) {
       auto oom_detail = base::FormattedString {} << "region size: " << region.size();
@@ -1989,14 +1989,14 @@ bool WasmCodeManager::ARM_SetDomainAndDACR(Address address, size_t size, int dom
     int32_t temp, dacr_val;
 
     JIT_Writable writable("JIT_Writable", domain_val);
-
+    //printf("\n\nARM_SetDomainAndDACR\n");
     // wasdom_device 디바이스 파일 열기
     fd = open("/dev/wasdom_device", O_RDWR);
     if (fd < 0) {
         printf("Error opening wasdom_device\n");
         return false;
     }
-    printf("wasdom_device open ----- (success)\n");
+    //printf("wasdom_device open ----- (success)\n");
 
     // DACR을 WASDOM_DACR_MANAGER로 설정(read/write/execute)
     dacr_val = WASDOM_DACR_MANAGER; // DACR 설정 값
@@ -2012,26 +2012,25 @@ bool WasmCodeManager::ARM_SetDomainAndDACR(Address address, size_t size, int dom
         close(fd);
         return false;
     }
-    printf("DACR applied ----- (success)\n");
+    //printf("DACR applied ----- (success)\n");
 
     // 페이지 권한을 설정(read/write/execute)(pagetable.c의 SetPermissions 함수 참고)
     SetPermissions(GetPlatformPageAllocator(), address, size, PageAllocator::kReadWriteExecute);
-    printf("SetPermissions ----- (success)\n");
+    //printf("SetPermissions ----- (success)\n");
 
     // Domain bit를 메모리 주소에 적용
     struct wasdom_user_input_domain input_domain;
     input_domain.domain_val = domain_val; 
     input_domain.address = address; 
     //input_domain.shift_size = WasmCodeManager::calculate_index(size); 
-    printf("Just before the ioctl \n\n\n\n\n");
     temp = ioctl(fd, WASDOM_CMD_WR_DOMAIN, &input_domain);
     if (temp < 0) {
         printf("Error setting domain in wasdom_driver\n");
         close(fd);
         return false;
     }
-    printf("Domain bit applied ----- (success)\n");
-
+    //printf("Domain bit applied ----- (success)\n");
+    //printf("End of ARM_SetDomainAndDACR \n\n");
     close(fd);
     return true;
 }
@@ -2060,7 +2059,7 @@ int WasmCodeManager::domain_bits_get(Address address) {
         printf("Error opening wasdom_device\n");
         return -1;
     }
-    printf("wasdom_device open ----- (success)\n");
+    //printf("wasdom_device open ----- (success)\n");
 
     // 주소에 대한 도메인 비트 확인
     temp = ioctl(fd, WASDOM_CMD_RD_DOMAIN, &input_domain);
@@ -2069,7 +2068,7 @@ int WasmCodeManager::domain_bits_get(Address address) {
         close(fd);
         return -1;
     }
-    printf("Domain bit read ----- (success)\n");
+    //printf("Domain bit read ----- (success)\n");
 
     domain_val = input_domain.domain_val;
 
@@ -2088,17 +2087,17 @@ void WasmCodeManager::Record_Table(Address address, size_t size, size_t hint, in
     }
     
     struct wasdom_user_input_table input_table;
+    input_table.start_addr = address;
+    input_table.size = size;
+    input_table.hint = hint; 
     input_table.domain_val = domain_bits;
-    input_table.start = (uintptr_t)address;
-    input_table.size = (uintptr_t)(size);
-    input_table.hint = (void*)(address + hint); // hint는 코드가 저장된 실제 마지막 위치를 가리킴
     temp = ioctl(fd, WASDOM_CMD_WR_TABLE, &input_table);
     if (temp < 0) {
         printf("Error updating domain table in wasdom_driver\n");
         close(fd);
         
     }
-    printf("Domain table updated ----- (success)\n");
+    //printf("Domain table updated ----- (success)\n");
 }
 
 void WasmCodeManager::Decommit(base::AddressRegion region) {
@@ -2131,94 +2130,153 @@ void WasmCodeManager::AssignRange(base::AddressRegion region,
 
 
 VirtualMemory WasmCodeManager::TryAllocate(size_t size, int code_vault_index, void* ori_hint) {
-    v8::PageAllocator* page_allocator = GetPlatformPageAllocator();
-    DCHECK_GT(size, 0);
-    const size_t TwoMiB = 2 * 1024 * 1024; // 2MiB in bytes.
-    size_t allocate_page_size = page_allocator->AllocatePageSize();
-    size_t rounded_size = RoundUp(size, allocate_page_size);
-    size_t reserved_size = TwoMiB; // Override to 2MB regardless of requested size
-    struct wasdom_user_input_table CV_info;
+    /*
+    if (code_vault_index == 0){
+      
+      v8::PageAllocator* page_allocator = GetPlatformPageAllocator();
+      DCHECK_GT(size, 0);
+      const size_t TwoMiB = 2 * 1024 * 1024; // 2MiB in bytes.
+      //size_t allocate_page_size = page_allocator->AllocatePageSize();
+      size = RoundUp(size, TwoMiB);
+      if (ori_hint == nullptr) ori_hint = page_allocator->GetRandomMmapAddr();
 
-    int fd = open("/dev/wasdom_device", O_RDWR);
-    if (fd < 0) {
-        printf("Error opening wasdom_device\n");
-        close(fd);
+      // When we start exposing Wasm in jitless mode, then the jitless flag
+      // will have to determine whether we set kMapAsJittable or not.
+      DCHECK(!v8_flags.jitless);
+      VirtualMemory mem(page_allocator, size, ori_hint, TwoMiB,
+                        JitPermission::kMapAsJittable);
+      if (!mem.IsReserved()) return {};
+      TRACE_HEAP("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(),
+                mem.end(), mem.size());
+
+      // TODO(v8:8462): Remove eager commit once perf supports remapping.
+      if (v8_flags.perf_prof) {
+        SetPermissions(GetPlatformPageAllocator(), mem.address(), mem.size(),
+                      PageAllocator::kReadWriteExecute);
+      }
+      return mem;
+
     }
+    else {
+    */
+      //printf("\n\n TryAllocate 함수 실행 \n");
+      v8::PageAllocator* page_allocator = GetPlatformPageAllocator();
+      DCHECK_GT(size, 0);
+      const size_t TwoMiB = 2 * 1024 * 1024; // 2MiB in bytes.
+      size_t allocate_page_size = page_allocator->AllocatePageSize();
+      size_t rounded_size = RoundUp(size, allocate_page_size);
+      size_t reserved_size = RoundUp(size, TwoMiB); // Override to 2MB regardless of requested size
+      
+      //code_vault_index에 대한 정보를 불러옴
+      
+      struct wasdom_user_input_table CodeVault_info;
+      
+      int fd = open("/dev/wasdom_device", O_RDWR);
+      if (fd < 0) {
+          printf("Error opening wasdom_device\n");
+          close(fd);
+      }
 
-    CV_info.domain_val = code_vault_index;  // 사용자가 요청한 도메인 번호 설정
-    // ioctl 호출 전에 CV_info 초기화
-    CV_info.start = 0;  // 유효하지 않은 주소로 초기화
-    CV_info.size = 0;
-    CV_info.hint = nullptr;
+      // 유효하지 않은 주소로 초기화
+      CodeVault_info.start_addr = 0;  
+      CodeVault_info.size = 0;
+      CodeVault_info.hint = 0;
+      // 사용자가 요청한 도메인 번호 설정
+      CodeVault_info.domain_val = code_vault_index;  
 
-    if (ioctl(fd, WASDOM_CMD_FIND_DOMAIN, &CV_info) < 0) {
-        printf("Error retrieving domain information from wasdom_driver\n");
-    } else {
-        printf("Domain information retrieved successfully: Start Addr: %x, Size: %x, Hint: %x\n",
-            CV_info.start, CV_info.size, (uintptr_t)CV_info.hint);
-    }
 
-    if (CV_info.start != 0) { // nullptr 대신 0 사용, C언어 스타일
-    
-      size_t end = CV_info.start + CV_info.size;
-      if (end - reinterpret_cast<size_t>(CV_info.hint) > rounded_size) { // 여유 공간 충분 여부 체크
-          void* hint = CV_info.hint; // hint 업데이트
-          
-          size_t new_hint = reinterpret_cast<size_t>(CV_info.hint) + rounded_size; // 새로운 hint 계산
-          // 도메인 정보 업데이트를 위한 Record_Table 호출
-          Record_Table(CV_info.start, CV_info.size, new_hint, code_vault_index);
-          
-          // 새로운 가상 메모리 할당 및 반환
-          return VirtualMemory(page_allocator, rounded_size, reinterpret_cast<void*>(hint), allocate_page_size, JitPermission::kMapAsJittable);
+      if (ioctl(fd, WASDOM_CMD_FIND_DOMAIN, &CodeVault_info) < 0) {
+          printf("Error retrieving domain information from wasdom_driver\n");
       } else {
-          // 여유 공간 부족 시, 새로운 도메인 할당 로직
-         void* hint = page_allocator->GetRandomMmapAddr();
-          
-          VirtualMemory mem(page_allocator, reserved_size, hint, allocate_page_size, JitPermission::kMapAsJittable);
-          
-          if (!mem.IsReserved()) return {};
-          TRACE_HEAP("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(), mem.end(), reserved_size);
-          
-          ThreadIsolation::RegisterJitPage(mem.address(), mem.size());
+          //printf("Domain information retrieved successfully: Start Addr: %lx, Size: %lx, Hint: %x\n",
+          //    CodeVault_info.start_addr, CodeVault_info.size, (uintptr_t)CodeVault_info.hint);
+      }
 
-          if (v8_flags.perf_prof) {
-            SetPermissions(GetPlatformPageAllocator(), mem.address(), mem.size(), PageAllocator::kReadWriteExecute);
+      if (CodeVault_info.start_addr > 0 && CodeVault_info.size > 0) {
+          //0. CODE VAULT 정보가 존재하는 경우
+          //printf("code vault 정보가 존재합니다.\n");
+
+          //1. 여유 공간 확인
+          size_t end = CodeVault_info.start_addr + CodeVault_info.size;
+          if (end - (CodeVault_info.start_addr + CodeVault_info.hint) > rounded_size) {       
+              
+          //2. 여유 공간이 있다면, 요청한 공간을 기존 code vault에 할당    
+              size_t page_size = AllocatePageSize();
+              void* hint = reinterpret_cast<void*>(CodeVault_info.start_addr + CodeVault_info.hint); 
+              VirtualMemory mem(page_allocator, rounded_size, hint, allocate_page_size, JitPermission::kMapAsJittable);
+              ThreadIsolation::RegisterJitPage(reinterpret_cast<Address>(hint), rounded_size);
+              
+              SetPermissions(GetPlatformPageAllocator(), mem.address(), mem.size(), PageAllocator::kReadWriteExecute);
+
+          //3 커널 테이블에 정보를 업데이트
+              size_t new_hint = RoundUp((CodeVault_info.hint + rounded_size), page_size);
+              Record_Table(CodeVault_info.start_addr, CodeVault_info.size, new_hint, code_vault_index);
+              
+          return mem;
           }
-          // ARM에서는 새 메모리 영역에 대한 Domain bit를 설정해야 함
+          
+          
+          else {
+          //4. 여유 공간 부족 시, 새로운 도메인 할당 로직
+            void* hint = page_allocator->GetRandomMmapAddr();
+              
+              VirtualMemory mem(page_allocator, rounded_size, hint, allocate_page_size, JitPermission::kMapAsJittable); 
+              
+              if (!mem.IsReserved()) return {};
+              TRACE_HEAP("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(), mem.end(), reserved_size);
+              
+              ThreadIsolation::RegisterJitPage(mem.address(), mem.size());
+
+              if (v8_flags.perf_prof) {
+                SetPermissions(GetPlatformPageAllocator(), mem.address(), mem.size(), PageAllocator::kReadWriteExecute);
+              }
+
+              Record_Table(mem.address(), reserved_size, rounded_size, code_vault_index);
+
+              //printf("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(), mem.end(), rounded_size);
+
+              //새롭게 생성된 code space에 대해 ARM_SetDomainAndDACR 함수 호출하여 Domain bit 설정 및 DACR 설정
+              ARM_SetDomainAndDACR(mem.address(), reserved_size, code_vault_index);
+
+              return mem;
+              }
+        
+      }
+      else { 
+          //size_t page_size = AllocatePageSize();
+          //현재, code_vault_index에 대한 code vault가 존재하지 않음
+          //printf("code vault를 생성합니다.(2MB)\n");
+          
+          // 1. hint를 랜덤 주소로 설정, 랜덤 공간에 code vault 지정
+          //void* hint = page_allocator->GetRandomMmapAddr(); 
+          void* Rand_add = page_allocator->GetRandomMmapAddr(); 
+          void* hint = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(Rand_add) & ~(TwoMiB - 1));
+
+          // 2. 2MB 예약 (새 code vault 공간 예약)
+          //mmap(hint, reserved_size, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0); 
+
+
+          // 3. code vault 내, 요청한 code space를 할당
+          VirtualMemory mem(page_allocator, rounded_size, hint, allocate_page_size, JitPermission::kMapAsJittable); 
+          if (!mem.IsReserved()) return {};
+          ThreadIsolation::RegisterJitPage(reinterpret_cast<Address>(hint), rounded_size);
+
+          // 4. SetPermissions 함수를 통해 code vault에 대한 기본 권한 설정
+          SetPermissions(GetPlatformPageAllocator(), mem.address(), rounded_size, PageAllocator::kReadWriteExecute);
+
+          // 5. 예약된 공간 정보를 커널 테이블에 기록 (rounded_size = 실사용크기, reserved_size = 2MB, code_vault_index = 도메인 번호)
+          Record_Table(mem.address(), reserved_size, rounded_size, code_vault_index);
+
+          // 6. 정보 출력
+          //printf("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(), mem.end(), rounded_size);
+
+          //새롭게 생성된 code space에 대해 ARM_SetDomainAndDACR 함수 호출하여 Domain bit 설정 및 DACR 설정
           ARM_SetDomainAndDACR(mem.address(), reserved_size, code_vault_index);
 
-          return VirtualMemory(page_allocator, rounded_size, reinterpret_cast<void*>(mem.address()), allocate_page_size, JitPermission::kMapAsJittable); // 새 code vault를 시작주소로 하는 virtual memory를 할당 및 반환
-        }
+          return mem;
+      }
 
-        
     }
-    else { //현재, domain 번호에 대한 code vault가 존재하지 않음
-        printf("code Vault를 생성합니다.\n");
-        void* hint = page_allocator->GetRandomMmapAddr(); // hint를 랜덤 주소로 설정
-        VirtualMemory mem(page_allocator, reserved_size, hint, allocate_page_size, JitPermission::kMapAsJittable); // 2MB 할당 (새 code vault 생성)
-        if (!mem.IsReserved()) return {};
-        
-        TRACE_HEAP("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(), mem.end(), reserved_size);
-        printf("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(), mem.end(), reserved_size);
-        ThreadIsolation::RegisterJitPage(mem.address(), reserved_size);
-
-        if (v8_flags.perf_prof) {
-            SetPermissions(GetPlatformPageAllocator(), mem.address(), reserved_size, PageAllocator::kReadWriteExecute);
-        }
-
-        //커널 테이블에 정보 기록
-        Record_Table(mem.address(), rounded_size, reserved_size, code_vault_index);
-
-        // ARM에서는 새 메모리 영역에 대한 Domain bit를 설정해야 함
-        ARM_SetDomainAndDACR(mem.address(), reserved_size, code_vault_index);
-        
-        // Return a VirtualMemory object that represents the actually requested memory size, not the whole reserved 2MB
-        return VirtualMemory(page_allocator, rounded_size, reinterpret_cast<void*>(mem.address()), allocate_page_size, JitPermission::kMapAsJittable);
-    }
-
-
-
-
 
 // 커널 테이블을 code_vault_index로 조회하여 메모리 정보를 확인
 // 커널 테이블을 조회하는 가상의 함수 Check_table을 활용
@@ -2227,7 +2285,6 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size, int code_vault_index, vo
 //힌트를 시작주소로 하는 virtual memory를 할당 및 반환.
 //record_table 함수를 호출하여 커널 테이블에 정보를 기록
       
-}
 
 /*
 VirtualMemory WasmCodeManager::TryAllocate(size_t size, void* hint) {
@@ -2455,7 +2512,7 @@ std::shared_ptr<NativeModule> WasmCodeManager::NewNativeModule(
   std::mt19937 gen(rd());
   std::uniform_int_distribution<> distrib(4, 15);
   int code_vault_index = distrib(gen);
-  printf("Generate Code_vault_index - %d\n", code_vault_index);
+  //printf("\n\n[newnativemodule] Generate Code_vault_index - %d\n\n", code_vault_index);
 
 
   for (int retries = 0;; ++retries) {
@@ -2478,9 +2535,11 @@ std::shared_ptr<NativeModule> WasmCodeManager::NewNativeModule(
   size_t size = code_space.size();
   Address end = code_space.end();
 
-  //새롭게 생성된 code space에 대해 ARM_SetDomainAndDACR 함수 호출하여 Domain bit 설정 및 DACR 설정
-  ARM_SetDomainAndDACR(start, size, code_vault_index);
-  
+  //printf("\n\n[newnativemodule] Code Space Address - 0x%" PRIxPTR "\n", start);
+  //printf("[newnativemodule] Code Space Size - %zu\n", size);
+  //printf("[newnativemodule] Code Space End - 0x%" PRIxPTR "\n\n", end);
+
+  JIT_Writable writable("NewNativeModule - Writable", code_vault_index);
 
   std::shared_ptr<NativeModule> ret;
   new NativeModule(enabled, compile_imports,
@@ -2529,14 +2588,14 @@ int WasmCodeManager::get_from_domain_table(Address address) {
 
   fd = open("/dev/wasdom_device", O_RDWR);
     if (fd < 0) {
-        printf("Error opening wasdom_device\n");
+        //printf("Error opening wasdom_device\n");
         return false;
     }
-    printf("wasdom_device open ----- (success)\n");
+    //printf("wasdom_device open ----- (success)\n");
 
   temp = ioctl(fd, WASDOM_CMD_RD_TABLE, &input_table);
   if (temp < 0) {
-      printf("Error setting domain in wasdom_driver\n");
+      //printf("Error setting domain in wasdom_driver\n");
       close(fd);
       return false;
   }
@@ -2610,7 +2669,8 @@ std::vector<std::unique_ptr<WasmCode>> NativeModule::AddCompiledCode(
 
   //code_space주소에 대해서, domain bit를 커널에서 받아오고 해당 domain bit를 생성자 및 소멸자를 사용하여 설정
  
-  int domain_number = WasmCodeManager::get_from_domain_table(reinterpret_cast<Address>(code_space.begin()));
+  //int domain_number = WasmCodeManager::get_from_domain_table(reinterpret_cast<Address>(code_space.begin()));
+  int domain_number = WasmCodeManager::domain_bits_get(reinterpret_cast<Address>(code_space.begin()));
   JIT_Writable writable("JIT_Writable", domain_number);
   
   //생성자와 소멸자를 사용하여, 코드를 저장하려는 code_space의 도메인 비트의 DACR 조절
